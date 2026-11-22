@@ -1,6 +1,7 @@
 // Tiny stack VM, variant B: table-driven / switch-dispatch interpreter.
-// One opcode table [imm, pops, pushes] drives the fetch + stack checks; one
-// binary-op table holds the exact 32-bit semantics. Same rules as ISA.md:
+// One opcode table [imm, pops, pushes] drives the fetch + stack checks; the
+// binary ops are inlined in the dispatch switch (no per-op table call), with
+// the exact 32-bit semantics. Same rules as ISA.md:
 // wrapping ints, 256-value stack, 64-deep calls, 256-word memory, ten traps
 // with their own exit codes, 1,000,000-step and 65,536-byte output limits.
 import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -8,9 +9,6 @@ import { join } from "node:path";
 
 // [immediate bytes, pops, pushes] per opcode byte; absent = unknown opcode (trap 5).
 const T: Record<number, [number, number, number]> = {0:[0,0,0],1:[1,0,1],2:[4,0,1],3:[0,1,0],4:[0,1,2],5:[0,2,2],6:[0,2,3],7:[0,3,3],16:[0,2,1],17:[0,2,1],18:[0,2,1],19:[0,2,1],20:[0,2,1],21:[0,2,1],22:[0,2,1],23:[0,1,1],24:[0,2,1],25:[0,2,1],26:[0,2,1],27:[0,1,1],28:[0,2,1],29:[0,2,1],30:[0,2,1],32:[0,2,1],33:[0,2,1],34:[0,2,1],48:[2,0,0],49:[2,1,0],50:[2,1,0],51:[2,0,0],52:[0,0,0],64:[0,1,1],65:[0,2,0],80:[0,1,0],81:[0,1,0],82:[0,0,1],83:[0,1,0]};
-
-// Binary ops by opcode: imul for exact MUL, unsigned DIVU/MODU/LTU, masked shifts.
-const B: Record<number, (a: number, b: number) => number> = {16:(a,b)=>a+b|0,17:(a,b)=>a-b|0,18:(a,b)=>Math.imul(a,b),19:(a,b)=>a===-2147483648&&b===-1?a:(a/b)|0,20:(a,b)=>b===-1?0:a%b|0,21:(a,b)=>Math.floor((a>>>0)/(b>>>0))|0,22:(a,b)=>(a>>>0)%(b>>>0)|0,24:(a,b)=>a&b,25:(a,b)=>a|b,26:(a,b)=>a^b,28:(a,b)=>a<<(b&31),29:(a,b)=>a>>(b&31),30:(a,b)=>a>>>(b&31)|0,32:(a,b)=>a===b?1:0,33:(a,b)=>a<b?1:0,34:(a,b)=>(a>>>0)<(b>>>0)?1:0};
 
 function run(p: Uint8Array, inp: Uint8Array): { o: Uint8Array; e: number } {
   const n = p.length, D = new Int32Array(256), C = new Int32Array(64), M = new Int32Array(256), out = new Uint8Array(65536);
@@ -75,9 +73,29 @@ function run(p: Uint8Array, inp: Uint8Array): { o: Uint8Array; e: number } {
       case 82: D[sp++] = ip < inp.length ? inp[ip++] : -1; break;
       case 83: return R(D[--sp] & 255);
       default: {
+        // Binary ops, inlined: imul for exact MUL, unsigned DIVU/MODU/LTU,
+        // masked shifts; DIV-family traps 4 on b = 0 before any stack change.
         const b = D[sp - 1], a = D[sp - 2];
-        if (op >= 19 && op <= 22 && b === 0) return R(4);
-        sp -= 2; D[sp++] = B[op](a, b);
+        let r = 0;
+        switch (op) {
+          case 16: r = a + b | 0; break;
+          case 17: r = a - b | 0; break;
+          case 18: r = Math.imul(a, b); break;
+          case 19: if (b === 0) return R(4); r = a === -2147483648 && b === -1 ? a : (a / b) | 0; break;
+          case 20: if (b === 0) return R(4); r = b === -1 ? 0 : a % b | 0; break;
+          case 21: if (b === 0) return R(4); r = Math.floor((a >>> 0) / (b >>> 0)) | 0; break;
+          case 22: if (b === 0) return R(4); r = (a >>> 0) % (b >>> 0) | 0; break;
+          case 24: r = a & b; break;
+          case 25: r = a | b; break;
+          case 26: r = a ^ b; break;
+          case 28: r = a << (b & 31); break;
+          case 29: r = a >> (b & 31); break;
+          case 30: r = a >>> (b & 31) | 0; break;
+          case 32: r = a === b ? 1 : 0; break;
+          case 33: r = a < b ? 1 : 0; break;
+          case 34: r = (a >>> 0) < (b >>> 0) ? 1 : 0; break;
+        }
+        sp -= 2; D[sp++] = r;
         break;
       }
     }
